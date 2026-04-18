@@ -4,24 +4,30 @@ import math
 import numpy as np
 
 BALL_COLORS_BGR = [
-    (60,  60,  255),   # red
-    (30,  160, 255),   # orange
-    (0,   230, 230),   # yellow
-    (30,  220, 30),    # green
-    (230, 230, 0),     # cyan
-    (255, 80,  30),    # blue
-    (255, 30,  160),   # violet
-    (200, 30,  255),   # purple
-    (30,  255, 150),   # lime
-    (255, 180, 30),    # sky blue
+    (60,  60,  255),
+    (30,  160, 255),
+    (0,   230, 230),
+    (30,  220, 30),
+    (230, 230, 0),
+    (255, 80,  30),
+    (255, 30,  160),
+    (200, 30,  255),
+    (30,  255, 150),
+    (255, 180, 30),
 ]
 
 JITTER_THRESHOLD = 8
-ELASTICITY = 0.85
 FRICTION = 0.3
 BALL_MASS = 1.0
-MAX_BALLS = 20
-SPAWN_INTERVAL = 1.2   # seconds between new balls
+
+DEFAULT_PARAMS = {
+    "size":       16,    # ball radius px
+    "h_speed":   120,    # max horizontal velocity at spawn
+    "rate":        8,    # balls spawned per 10 s  → interval = 10/rate
+    "gravity":   900,    # px/s²
+    "bounce":     85,    # elasticity × 100
+    "max_balls":  20,
+}
 
 
 class PhysicsWorld:
@@ -30,19 +36,19 @@ class PhysicsWorld:
         self.height = height
 
         self.space = pymunk.Space()
-        self.space.gravity = (0, 900)
+        self.space.gravity = (0, DEFAULT_PARAMS["gravity"])
 
-        self._add_screen_borders()
+        self._wall_shapes = self._add_screen_borders()
 
         self.obstacle_shapes = []
         self.obstacle_body = None
         self._prev_centroids = []
 
-        self.balls = []       # list of (body, shape, color)
+        self.balls = []
         self._color_idx = 0
         self._spawn_timer = 0.0
 
-    # ── screen border walls (left + right only — balls fall in from top, out at bottom) ──
+    # ── screen border walls ────────────────────────────────────────────────
     def _add_screen_borders(self):
         w, h = self.width, self.height
         sb = self.space.static_body
@@ -51,9 +57,10 @@ class PhysicsWorld:
             pymunk.Segment(sb, (w, 0), (w, h), 4),   # right
         ]
         for seg in walls:
-            seg.elasticity = ELASTICITY
+            seg.elasticity = DEFAULT_PARAMS["bounce"] / 100
             seg.friction = FRICTION
         self.space.add(*walls)
+        return walls
 
     # ── ball spawning ──────────────────────────────────────────────────────
     def _next_color(self):
@@ -61,45 +68,34 @@ class PhysicsWorld:
         self._color_idx += 1
         return color
 
-    def _spawn_one(self):
-        radius = random.randint(12, 20)
-        cx = self.width // 2
-        x = cx + random.randint(-60, 60)
-        y = radius + 2   # just inside top edge
-        vx = random.uniform(-120, 120)
-
+    def _make_ball(self, x, y, radius, h_speed, elasticity):
+        vx = random.uniform(-h_speed, h_speed)
         moment = pymunk.moment_for_circle(BALL_MASS, 0, radius)
         body = pymunk.Body(BALL_MASS, moment)
         body.position = (x, y)
         body.velocity = (vx, 0)
-
         shape = pymunk.Circle(body, radius)
-        shape.elasticity = ELASTICITY
+        shape.elasticity = elasticity
         shape.friction = FRICTION
-
         self.space.add(body, shape)
         self.balls.append((body, shape, self._next_color()))
 
-    def spawn_initial(self, n=10):
-        """Drop n balls staggered from the top so they cascade in."""
+    def _spawn_one(self, params):
+        radius = params["size"] + random.randint(-4, 4)
+        radius = max(5, radius)
+        cx = self.width // 2
+        x = cx + random.randint(-60, 60)
+        y = radius + 2
+        self._make_ball(x, y, radius, params["h_speed"], params["bounce"] / 100)
+
+    def spawn_initial(self, n, params):
         for i in range(n):
-            radius = random.randint(12, 20)
+            radius = params["size"] + random.randint(-4, 4)
+            radius = max(5, radius)
             cx = self.width // 2
             x = cx + random.randint(-80, 80)
-            y = radius + 2 + i * 55   # stack them downward from top so they don't overlap
-            vx = random.uniform(-100, 100)
-
-            moment = pymunk.moment_for_circle(BALL_MASS, 0, radius)
-            body = pymunk.Body(BALL_MASS, moment)
-            body.position = (x, y)
-            body.velocity = (vx, 0)
-
-            shape = pymunk.Circle(body, radius)
-            shape.elasticity = ELASTICITY
-            shape.friction = FRICTION
-
-            self.space.add(body, shape)
-            self.balls.append((body, shape, self._next_color()))
+            y = radius + 2 + i * (radius * 2 + 10)
+            self._make_ball(x, y, radius, params["h_speed"], params["bounce"] / 100)
 
     # ── obstacle management ────────────────────────────────────────────────
     def _centroid(self, pts):
@@ -110,12 +106,11 @@ class PhysicsWorld:
             return True
         for hull, prev_c in zip(new_contours, self._prev_centroids):
             c = self._centroid(hull.astype(float))
-            dist = math.hypot(c[0] - prev_c[0], c[1] - prev_c[1])
-            if dist >= JITTER_THRESHOLD:
+            if math.hypot(c[0] - prev_c[0], c[1] - prev_c[1]) >= JITTER_THRESHOLD:
                 return True
         return False
 
-    def update_obstacles(self, contours):
+    def update_obstacles(self, contours, elasticity):
         if not self._should_update(contours):
             return
 
@@ -143,7 +138,7 @@ class PhysicsWorld:
                 a = tuple(pts[j].astype(int))
                 b = tuple(pts[(j + 1) % n].astype(int))
                 seg = pymunk.Segment(static_body, a, b, 3)
-                seg.elasticity = ELASTICITY
+                seg.elasticity = elasticity
                 seg.friction = FRICTION
                 self.obstacle_shapes.append(seg)
 
@@ -151,19 +146,19 @@ class PhysicsWorld:
         self._prev_centroids = new_centroids
 
     # ── simulation step ────────────────────────────────────────────────────
-    def step(self, dt):
+    def step(self, dt, params):
+        self.space.gravity = (0, params["gravity"])
         self.space.step(min(dt, 1 / 30))
 
-        # remove balls that have fallen off the bottom
         fallen = [b for b in self.balls if b[0].position.y > self.height + 80]
         for ball in fallen:
             self.space.remove(ball[0], ball[1])
             self.balls.remove(ball)
 
-        # timed fountain spawn
+        interval = 10.0 / max(params["rate"], 1)
         self._spawn_timer += dt
-        if self._spawn_timer >= SPAWN_INTERVAL and len(self.balls) < MAX_BALLS:
-            self._spawn_one()
+        if self._spawn_timer >= interval and len(self.balls) < params["max_balls"]:
+            self._spawn_one(params)
             self._spawn_timer = 0.0
 
     # ── query for rendering ────────────────────────────────────────────────
