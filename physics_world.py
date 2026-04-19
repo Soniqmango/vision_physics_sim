@@ -18,7 +18,10 @@ BALL_COLORS_BGR = [
 
 JITTER_THRESHOLD = 8
 FRICTION = 0.3
+OBSTACLE_FRICTION = 0.0   # frictionless so balls slide off instead of resting
 BALL_MASS = 1.0
+STUCK_SPEED = 40          # px/s — below this a ball is considered stuck
+STUCK_TIME  = 0.7         # seconds before a stuck ball gets a kick
 
 DEFAULT_PARAMS = {
     "size":       16,    # ball radius px
@@ -47,6 +50,7 @@ class PhysicsWorld:
         self.balls = []
         self._color_idx = 0
         self._spawn_timer = 0.0
+        self._stuck_timers = {}   # body → seconds spent slow
 
     # ── screen border walls ────────────────────────────────────────────────
     def _add_screen_borders(self):
@@ -83,19 +87,17 @@ class PhysicsWorld:
     def _spawn_one(self, params):
         radius = params["size"] + random.randint(-4, 4)
         radius = max(5, radius)
-        cx = self.width // 2
-        x = cx + random.randint(-60, 60)
+        x = self.width // 2
         y = radius + 2
-        self._make_ball(x, y, radius, params["h_speed"], params["bounce"] / 100)
+        self._make_ball(x, y, radius, 0, params["bounce"] / 100)
 
     def spawn_initial(self, n, params):
         for i in range(n):
             radius = params["size"] + random.randint(-4, 4)
             radius = max(5, radius)
-            cx = self.width // 2
-            x = cx + random.randint(-80, 80)
+            x = self.width // 2
             y = radius + 2 + i * (radius * 2 + 10)
-            self._make_ball(x, y, radius, params["h_speed"], params["bounce"] / 100)
+            self._make_ball(x, y, radius, 0, params["bounce"] / 100)
 
     # ── obstacle management ────────────────────────────────────────────────
     def _centroid(self, pts):
@@ -139,7 +141,7 @@ class PhysicsWorld:
                 b = tuple(pts[(j + 1) % n].astype(int))
                 seg = pymunk.Segment(static_body, a, b, 3)
                 seg.elasticity = elasticity
-                seg.friction = FRICTION
+                seg.friction = OBSTACLE_FRICTION
                 self.obstacle_shapes.append(seg)
 
         self.space.add(*self.obstacle_shapes)
@@ -152,8 +154,24 @@ class PhysicsWorld:
 
         fallen = [b for b in self.balls if b[0].position.y > self.height + 80]
         for ball in fallen:
+            self._stuck_timers.pop(ball[0], None)
             self.space.remove(ball[0], ball[1])
             self.balls.remove(ball)
+
+        # kick any ball that has been nearly stationary for too long
+        active_bodies = set()
+        for body, _, _ in self.balls:
+            active_bodies.add(body)
+            if body.velocity.length < STUCK_SPEED:
+                self._stuck_timers[body] = self._stuck_timers.get(body, 0) + dt
+                if self._stuck_timers[body] >= STUCK_TIME:
+                    body.apply_impulse_at_local_point(
+                        (random.uniform(-150, 150), -random.uniform(200, 400))
+                    )
+                    self._stuck_timers[body] = 0
+            else:
+                self._stuck_timers.pop(body, None)
+        self._stuck_timers = {b: t for b, t in self._stuck_timers.items() if b in active_bodies}
 
         interval = 10.0 / max(params["rate"], 1)
         self._spawn_timer += dt
